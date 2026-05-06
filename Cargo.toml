@@ -1,0 +1,30 @@
+[package]
+name = "twiistsync"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only"
+description = "Sync Twiist Insight follower-service data to a Nightscout instance."
+
+[[bin]]
+name = "twiistsync"
+path = "src/main.rs"
+
+[dependencies]
+nightscout = { git = "https://github.com/E-Allie/nightscout-rs.git", rev = "26d903b8aed1f43f9cdc1e58cf2e4ac7bae9f82d" }
+tidepool = { git = "https://github.com/E-Allie/tidepool-rs.git", rev = "5d41d88605ae6d6856f38fdbd10e6a85dd9ff630" }
+tidepoolsync = { git = "https://github.com/E-Allie/tidepoolsync.git", rev = "73c5079481c2cce8aca5e1101499e865891c2300" }
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_with = { version = "3.18.0", features = ["chrono_0_4", "json", "macros"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+rust_decimal = { version = "1.41.0", features = ["serde-with-arbitrary-precision", "serde-with-str"] }
+rust_decimal_macros = "1.40.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+uuid = { version = "1.23.1", features = ["v4", "serde"] }
+base64 = "0.22.1"
+secrecy = { version = "0.10", features = ["serde"] }
+clap = { version = "4.6.1", features = ["derive"] }
+flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }

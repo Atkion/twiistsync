@@ -1,0 +1,33 @@
+{
+  "twiist": {
+    "username": "follower@example.com",
+    "password": "REPLACE_ME",
+    "pwd_uuid": "00000000-0000-0000-0000-000000000000",
+    //Optional
+    "refresh_token_path": "/home/you/.local/state/twiistsync/session.json"
+  },
+  "nightscout": {
+    "website": "http://127.0.0.1:1337/",
+    "permission_role": "twiist-xxxxxxxx",
+    "timezone": "America/New_York",
+    "glucose_unit": "mg/dl",
+    "carbs_hr": 20,
+    "delay": 20
+  },
+  "sync": {
+    "interval_secs": 300,
+    //Optional
+    "tidepool_watermark_path": "/home/you/.local/state/twiistsync/tidepool_state.json",
+    "glucose_unit": "mg/dL",
+    "emit_glucose": true,
+    "emit_insulin": false,
+    "emit_pump_events": false,
+    "emit_food": false,
+    "emit_device_status": true
+  },
+  "tidepool": {
+    "username": "you@example.com",
+    "password": "REPLACE_ME",
+    "patient_uuid": "00000000-0000-0000-0000-000000000000"
+  }
+}
