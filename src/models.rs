@@ -31,7 +31,7 @@ pub struct Status {
     pub loop_algorithm: Option<LoopAlgorithm>,
     pub events: Option<Vec<Event>>,
     #[serde(rename = "activeEvents")]
-    pub active_events: Option<Vec<String>>,
+    pub active_events: Option<Vec<Event>>,
     #[serde(rename = "insulinHistory")]
     pub insulin_history: Option<Vec<InsulinDose>>,
     #[serde(rename = "mealHistory")]
@@ -281,6 +281,22 @@ mod tests {
         let meal: Meal = serde_json::from_str(json).unwrap();
         assert_eq!(meal.grams, Some(dec!(50.0)));
         assert_eq!(meal.absorption_time_seconds, Some(dec!(10800.0)));
+    }
+
+    #[test]
+    fn active_events_parse_as_event_objects() {
+        let json = r#"{
+            "activeEvents":[
+              {"id":"event-1","type":"alarm","source":"pump"}
+            ]
+          }"#;
+        let status: Status = serde_json::from_str(json).unwrap();
+        let active_events = status.active_events.expect("active events parse");
+        assert_eq!(active_events.len(), 1);
+        assert_eq!(active_events[0].id.as_deref(), Some("event-1"));
+        assert_eq!(active_events[0].type_.as_deref(), Some("alarm"));
+        assert_eq!(active_events[0].source.as_deref(), Some("pump"));
+        assert!(active_events[0].timestamp.is_none());
     }
 
     /// Blob fields parse as `{data: ...}` wrappers.
