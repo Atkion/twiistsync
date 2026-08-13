@@ -8,7 +8,9 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use serde::de;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use rust_decimal::serde::str_option as decimal_str;
@@ -131,7 +133,11 @@ pub struct Details {
     pub high_glucose_target_override: Option<Decimal>,
     #[serde(rename = "lowGlucoseTargetOverride", with = "decimal_str", default)]
     pub low_glucose_target_override: Option<Decimal>,
-    #[serde(rename = "targetOverrideDurationSeconds")]
+    #[serde(
+        rename = "targetOverrideDurationSeconds",
+        default,
+        deserialize_with = "finite_i64_or_inf::deserialize"
+    )]
     pub target_override_duration_seconds: Option<i64>,
     #[serde(rename = "targetOverrideUnit")]
     pub target_override_unit: Option<String>,
@@ -193,6 +199,69 @@ pub struct Meal {
     pub food_type: Option<String>,
     #[serde(with = "decimal_str", default)]
     pub grams: Option<Decimal>,
+}
+
+mod finite_i64_or_inf {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<Value>::deserialize(deserializer)?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        match value {
+            Value::Null => Ok(None),
+            Value::Number(n) => {
+                if let Some(v) = n.as_i64() {
+                    Ok(Some(v))
+                } else if let Some(v) = n.as_u64() {
+                    i64::try_from(v).map(Some).map_err(de::Error::custom)
+                } else if let Some(v) = n.as_f64() {
+                    finite_f64_to_i64(v).map_err(de::Error::custom)
+                } else {
+                    Err(de::Error::custom("unsupported numeric duration"))
+                }
+            }
+            Value::String(s) => {
+                let s = s.trim();
+                if s.is_empty()
+                    || matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "inf" | "+inf" | "infinity" | "+infinity"
+                    )
+                {
+                    return Ok(None);
+                }
+
+                if let Ok(v) = s.parse::<i64>() {
+                    return Ok(Some(v));
+                }
+
+                let v = s.parse::<f64>().map_err(de::Error::custom)?;
+                finite_f64_to_i64(v).map_err(de::Error::custom)
+            }
+            other => Err(de::Error::custom(format!(
+                "cannot parse {other:?} as finite duration seconds"
+            ))),
+        }
+    }
+
+    fn finite_f64_to_i64(value: f64) -> Result<Option<i64>, String> {
+        if !value.is_finite() {
+            return Ok(None);
+        }
+        if value.fract() != 0.0 {
+            return Err(format!("duration seconds must be integral, got {value}"));
+        }
+        if value < i64::MIN as f64 || value > i64::MAX as f64 {
+            return Err(format!("duration seconds out of i64 range: {value}"));
+        }
+        Ok(Some(value as i64))
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +350,25 @@ mod tests {
         let meal: Meal = serde_json::from_str(json).unwrap();
         assert_eq!(meal.grams, Some(dec!(50.0)));
         assert_eq!(meal.absorption_time_seconds, Some(dec!(10800.0)));
+    }
+
+    #[test]
+    fn target_override_duration_seconds_parses_finite_and_infinite_values() {
+        let numeric: Details =
+            serde_json::from_str(r#"{"targetOverrideDurationSeconds":3600}"#).unwrap();
+        assert_eq!(numeric.target_override_duration_seconds, Some(3600));
+
+        let string: Details =
+            serde_json::from_str(r#"{"targetOverrideDurationSeconds":"7200"}"#).unwrap();
+        assert_eq!(string.target_override_duration_seconds, Some(7200));
+
+        let decimal_string: Details =
+            serde_json::from_str(r#"{"targetOverrideDurationSeconds":"10800.0"}"#).unwrap();
+        assert_eq!(decimal_string.target_override_duration_seconds, Some(10800));
+
+        let infinite: Details =
+            serde_json::from_str(r#"{"targetOverrideDurationSeconds":"inf"}"#).unwrap();
+        assert_eq!(infinite.target_override_duration_seconds, None);
     }
 
     #[test]
