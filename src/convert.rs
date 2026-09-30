@@ -50,6 +50,9 @@ pub struct NsBatch {
     pub cgm: Vec<Entry>,
     pub bolus: Vec<Treatment>,
     pub basal: Vec<Treatment>,
+    /// The temp basal running now. Its duration runs to the commanded end
+    /// and changes as later packages arrive, so it is re-posted each sync.
+    pub open_basal: Option<Treatment>,
     pub meal: Vec<Treatment>,
     pub alarm: Vec<Treatment>,
     pub sitechange: Vec<Treatment>,
@@ -110,11 +113,13 @@ pub fn convert_package(pkg: &Package, flags: EmitFlags) -> NsBatch {
     // Convert pulse-level basal into Tidepool-shaped phases.
     if flags.insulin {
         if let Some(scheduled) = derive_scheduled_basal_rate(status) {
-            batch.basal.extend(insulin_delivery_to_phase_treatments(
+            let mut phases = insulin_delivery_to_phase_treatments(
                 status.insulin_delivery.as_ref(),
                 scheduled,
                 &device,
-            ));
+            );
+            batch.open_basal = phases.pop();
+            batch.basal.extend(phases);
         } else {
             log_info!(
                 "insulinDelivery: skipped - can't derive scheduled basal rate (details.basalRate_UnitsPerHour or summary.netBasal_UnitsPerHour missing)"
@@ -163,7 +168,7 @@ pub fn convert_package(pkg: &Package, flags: EmitFlags) -> NsBatch {
 
     log_info!(
         "convert_package: pwd={} (nickname={:?}) flags={flags:?} -> \
-         cgm={}, bolus={}, basal={}, meal={}, alarm={}, sitechange={}, \
+         cgm={}, bolus={}, basal={}, open_basal={}, meal={}, alarm={}, sitechange={}, \
          suspend={}, resume={}, looperr={}, devicestatus={} \
          (raw counts: events={}, insulin={}, meals={})",
         pkg.pwd_id,
@@ -171,6 +176,7 @@ pub fn convert_package(pkg: &Package, flags: EmitFlags) -> NsBatch {
         batch.cgm.len(),
         batch.bolus.len(),
         batch.basal.len(),
+        batch.open_basal.is_some(),
         batch.meal.len(),
         batch.alarm.len(),
         batch.sitechange.len(),

@@ -141,6 +141,20 @@ pub fn post_batch(
         dry_run,
         &mut stats,
     );
+    // Leaving the watermark behind the open basal makes the next sync post it
+    // again, and Nightscout updates the doc in place by identifier until the
+    // phase closes and lands in `batch.basal`.
+    if let Some(doc) = &batch.open_basal
+        && watermark.get("basal").is_none_or(|w| doc.base.date > w)
+    {
+        match post_one("treatments", doc, ns, dry_run) {
+            Ok(_) => stats.ok += 1,
+            Err(e) => {
+                stats.fail += 1;
+                eprintln!("treatments POST failed (kind=basal, open phase): {e:#}");
+            }
+        }
+    }
     post_bucket(
         "meal",
         "treatments",
@@ -443,5 +457,70 @@ mod tests {
 
         assert_eq!(stats.fail, 2);
         assert_eq!(watermark.get("cgm"), None);
+    }
+
+    fn package_with_basal(pulses: &[(u32, u32, i16)]) -> Package {
+        use base64::Engine;
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+
+        let mut raw = Vec::new();
+        for (start, end, delta) in pulses {
+            raw.extend_from_slice(&start.to_le_bytes());
+            raw.extend_from_slice(&end.to_le_bytes());
+            raw.extend_from_slice(&delta.to_le_bytes());
+        }
+        let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let blob = base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap());
+
+        Package {
+            pwd_id: Uuid::nil(),
+            pwd_nickname: "test".to_string(),
+            status: crate::models::Status {
+                details: Some(crate::models::Details {
+                    basal_rate_units_per_hour: Some(Decimal::ZERO),
+                    ..Default::default()
+                }),
+                summary: Some(crate::models::Summary {
+                    net_basal_units_per_hour: Some(Decimal::new(-5, 1)),
+                    ..Default::default()
+                }),
+                insulin_delivery: Some(crate::models::RawBlob { data: Some(blob) }),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn open_basal_is_reposted_until_it_closes() {
+        let flags = EmitFlags {
+            glucose: false,
+            insulin: true,
+            pump_events: false,
+            food: false,
+            device_status: false,
+        };
+        let closed_start = crate::blobs::decode_timestamp(0)
+            .unwrap()
+            .timestamp_millis();
+        let open_start = crate::blobs::decode_timestamp(300)
+            .unwrap()
+            .timestamp_millis();
+        let pkg = package_with_basal(&[(0, 300, 0), (300, 2100, -50)]);
+        let mut watermark = Watermark::none();
+
+        let first = post_batch(&pkg, None, true, &mut watermark, flags).unwrap();
+        assert_eq!(first.ok, 2);
+        assert_eq!(watermark.get("basal"), Some(closed_start));
+
+        let second = post_batch(&pkg, None, true, &mut watermark, flags).unwrap();
+        assert_eq!((second.ok, second.skipped), (1, 1));
+        assert_eq!(watermark.get("basal"), Some(closed_start));
+
+        // The zero temp is superseded, so it closes and the watermark moves on.
+        let pkg = package_with_basal(&[(0, 300, 0), (300, 600, -50), (600, 2400, 0)]);
+        post_batch(&pkg, None, true, &mut watermark, flags).unwrap();
+        assert_eq!(watermark.get("basal"), Some(open_start));
     }
 }

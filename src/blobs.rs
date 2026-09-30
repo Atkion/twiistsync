@@ -149,20 +149,19 @@ impl BasalPhase {
 /// Aggregate pulse-level records into Tidepool-shaped basals.
 /// Merge consecutive pulses when the rate matches and the next start
 /// equals the previous end.
+///
+/// The blob's final pulse is the temp basal the pump is running now, with
+/// its commanded (not yet delivered) end, typically 30 min out. It is kept,
+/// so the last phase returned is still open: its end is a projection that
+/// later packages will shorten or extend.
 pub fn aggregate_pulses_to_phases(
     pulses: &[InsulinDelivery],
     scheduled_rate_u_per_hr: Decimal,
 ) -> Vec<BasalPhase> {
-    // Drop the trailing forward-projection pulse.
-    if pulses.len() <= 1 {
-        return Vec::new();
-    }
-    let kept = &pulses[..pulses.len() - 1];
-
     let mut phases = Vec::new();
     let mut cur: Option<BasalPhase> = None;
 
-    for p in kept {
+    for p in pulses {
         let rate = absolute_rate_u_per_hr(p, scheduled_rate_u_per_hr);
         match cur {
             Some(phase) if phase.rate_u_per_hr == rate && phase.end == p.start => {
@@ -356,12 +355,7 @@ mod tests {
 
     #[test]
     fn aggregator_merges_minute_boundary_split() {
-        let pulses = vec![
-            pulse(0, 127, 224),
-            pulse(127, 173, 224),
-            // Forward projection, dropped by the aggregator.
-            pulse(300, 1800, 0),
-        ];
+        let pulses = vec![pulse(0, 127, 224), pulse(127, 173, 224)];
         let phases = aggregate_pulses_to_phases(&pulses, dec!(0.6));
         assert_eq!(phases.len(), 1);
         assert_eq!(phases[0].rate_u_per_hr, dec!(2.84));
@@ -373,7 +367,6 @@ mod tests {
         let pulses = vec![
             pulse(0, 300, 0),     // 0.60 U/hr
             pulse(300, 300, 100), // 1.60 U/hr
-            pulse(600, 1800, 0),  // forward projection, dropped
         ];
         let phases = aggregate_pulses_to_phases(&pulses, dec!(0.6));
         assert_eq!(phases.len(), 2);
@@ -389,7 +382,6 @@ mod tests {
             pulse(0, 300, 0),
             // Gap of 60 s.
             pulse(360, 300, 0),
-            pulse(660, 1800, 0), // forward projection, dropped
         ];
         let phases = aggregate_pulses_to_phases(&pulses, dec!(0.6));
         assert_eq!(phases.len(), 2);
@@ -398,21 +390,32 @@ mod tests {
     }
 
     #[test]
-    fn aggregator_drops_trailing_pulse() {
+    fn aggregator_extends_the_open_phase_through_the_running_temp_basal() {
+        // Shape of a real blob tail: delivered pulses, then the running
+        // 30 min temp basal at the same rate.
         let pulses = vec![
-            pulse(0, 300, 0),
-            pulse(300, 300, 0),
-            pulse(600, 1800, 0), // would otherwise extend 30 min past end
+            pulse(0, 300, -50),
+            pulse(300, 300, -50),
+            pulse(600, 1800, -50),
         ];
-        let phases = aggregate_pulses_to_phases(&pulses, dec!(0.6));
+        let phases = aggregate_pulses_to_phases(&pulses, dec!(0.5));
         assert_eq!(phases.len(), 1);
-        assert_eq!(phases[0].duration_minutes(), dec!(10));
+        assert_eq!(phases[0].rate_u_per_hr, dec!(0));
+        assert_eq!(phases[0].duration_minutes(), dec!(40));
     }
 
     #[test]
-    fn aggregator_single_pulse_emits_nothing() {
-        let pulses = vec![pulse(0, 1800, 0)];
-        let phases = aggregate_pulses_to_phases(&pulses, dec!(0.6));
-        assert!(phases.is_empty());
+    fn aggregator_starts_a_new_open_phase_when_the_running_rate_differs() {
+        let pulses = vec![pulse(0, 300, 0), pulse(300, 1800, 36)];
+        let phases = aggregate_pulses_to_phases(&pulses, dec!(0.5));
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].duration_minutes(), dec!(5));
+        assert_eq!(phases[1].rate_u_per_hr, dec!(0.86));
+        assert_eq!(phases[1].duration_minutes(), dec!(30));
+    }
+
+    #[test]
+    fn aggregator_empty_input_emits_nothing() {
+        assert!(aggregate_pulses_to_phases(&[], dec!(0.6)).is_empty());
     }
 }
