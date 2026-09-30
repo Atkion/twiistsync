@@ -1,7 +1,6 @@
 //! Twiist Insight follower to Nightscout sync.
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
 use clap::Parser;
 use reqwest::blocking::Client;
 
@@ -11,7 +10,7 @@ use config::Config;
 use dispatch::sync_once;
 use models::Package;
 use twiist::TwiistClient;
-use watermark::{Watermark, seed_watermark};
+use watermark::Watermark;
 
 mod auth;
 mod blobs;
@@ -196,21 +195,17 @@ fn run_live(cli: &Cli, config: &Config, emit_flags: convert::EmitFlags) -> Resul
             .context("--backfill-profile")?;
     }
 
-    let tidepool_seed = if let Some(days) = cli.backfill {
-        Some(
-            tidepool_glue::do_tidepool_backfill(
-                config,
-                days as i64,
-                ns.as_ref(),
-                cli.dry_run,
-                &tidepool_watermark,
-                http.clone(),
-            )
-            .context("--backfill")?,
+    if let Some(days) = cli.backfill {
+        tidepool_glue::do_tidepool_backfill(
+            config,
+            days as i64,
+            ns.as_ref(),
+            cli.dry_run,
+            &tidepool_watermark,
+            http.clone(),
         )
-    } else {
-        None
-    };
+        .context("--backfill")?;
+    }
 
     let mut twiist_client = TwiistClient::new(
         config.twiist.follower_service_url().to_string(),
@@ -232,15 +227,13 @@ fn run_live(cli: &Cli, config: &Config, emit_flags: convert::EmitFlags) -> Resul
             cli.dry_run,
             cli.dump_package.as_deref(),
             emit_flags,
-            tidepool_seed.as_ref(),
             cli.tidepool_refresh_secs,
             config,
             &tidepool_watermark,
             http.clone(),
         )
     } else {
-        // One-shot uses the same first-tick watermark seeding as daemon mode.
-        let mut wm = seed_watermark(Utc::now(), interval_secs as i64, tidepool_seed.as_ref());
+        let mut wm = Watermark::none();
         sync_once(
             &twiist_client,
             ns.as_ref(),

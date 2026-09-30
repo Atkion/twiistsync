@@ -19,7 +19,7 @@ use crate::dispatch;
 use crate::log_info;
 use crate::tidepool_glue;
 use crate::twiist::{self, TwiistClient};
-use crate::watermark::seed_watermark;
+use crate::watermark::Watermark;
 
 pub const DEFAULT_POLL_SECS: u64 = 300;
 
@@ -69,7 +69,6 @@ pub fn run_daemon(
     dry_run: bool,
     dump_to: Option<&Path>,
     emit_flags: EmitFlags,
-    tidepool_seed: Option<&tidepoolsync::sync::SyncStats>,
     tidepool_refresh_secs: Option<u64>,
     config: &Config,
     tidepool_watermark_path: &Path,
@@ -89,7 +88,7 @@ pub fn run_daemon(
     }
     let mut last_upload: Option<DateTime<Utc>> = None;
 
-    let mut watermark = seed_watermark(Utc::now(), interval_secs as i64, tidepool_seed);
+    let mut watermark = Watermark::none();
     let mut last_topup = Utc::now();
     // Refresh shortly before the access token expires.
     const PROACTIVE_REFRESH_LEAD_SECS: i64 = 60;
