@@ -1,4 +1,6 @@
-FROM rust:latest AS builder
+# Builder and runtime must share a Debian release: a binary linked against a
+# newer glibc than the runtime has fails at startup.
+FROM rust:1-trixie AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -8,7 +10,7 @@ WORKDIR /build
 COPY . .
 RUN cargo build --release
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
