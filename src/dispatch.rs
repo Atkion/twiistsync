@@ -34,50 +34,34 @@ impl HasBaseDate for nightscout::Devicestatus {
     }
 }
 
+/// How to recognise a copy of a doc that another source (or an earlier
+/// sync) already posted with a slightly different timestamp.
+#[derive(Debug, Clone, Copy)]
+pub enum DedupRule {
+    /// A bolus of the same amount within BOLUS_DEDUP_WINDOW_MS.
+    Bolus(Decimal),
+    /// A treatment of this event type within TREATMENT_DEDUP_WINDOW_MS.
+    Event(&'static str),
+    /// Any other Temp Basal within TEMP_BASAL_DEDUP_WINDOW_MS.
+    TempBasal,
+}
+
 pub trait DedupKey {
-    fn bolus_dedup_key(&self) -> Option<(i64, Decimal)>;
-    fn treatment_dedup_event_type(&self) -> Option<&'static str>;
-    fn is_temp_basal(&self) -> bool;
-}
-impl DedupKey for nightscout::Entry {
-    fn bolus_dedup_key(&self) -> Option<(i64, Decimal)> {
+    fn dedup_rule(&self) -> Option<DedupRule> {
         None
-    }
-    fn treatment_dedup_event_type(&self) -> Option<&'static str> {
-        None
-    }
-    fn is_temp_basal(&self) -> bool {
-        false
     }
 }
-impl DedupKey for nightscout::Devicestatus {
-    fn bolus_dedup_key(&self) -> Option<(i64, Decimal)> {
-        None
-    }
-    fn treatment_dedup_event_type(&self) -> Option<&'static str> {
-        None
-    }
-    fn is_temp_basal(&self) -> bool {
-        false
-    }
-}
+impl DedupKey for nightscout::Entry {}
+impl DedupKey for nightscout::Devicestatus {}
 impl DedupKey for nightscout::Treatment {
-    fn bolus_dedup_key(&self) -> Option<(i64, Decimal)> {
+    fn dedup_rule(&self) -> Option<DedupRule> {
         if self.is_bolus() {
-            self.insulin.map(|i| (self.base.date, i))
-        } else {
-            None
+            return self.insulin.map(DedupRule::Bolus);
         }
-    }
-    fn treatment_dedup_event_type(&self) -> Option<&'static str> {
-        if self.is_bolus() {
-            None
-        } else {
-            self.dedup_event_type()
+        if let Some(event_type) = self.dedup_event_type() {
+            return Some(DedupRule::Event(event_type));
         }
-    }
-    fn is_temp_basal(&self) -> bool {
-        self.event_type.as_deref() == Some("Temp Basal")
+        (self.event_type.as_deref() == Some("Temp Basal")).then_some(DedupRule::TempBasal)
     }
 }
 
@@ -133,25 +117,18 @@ pub fn post_batch(
     post_bucket(
         "cgm", "entries", &batch.cgm, watermark, ns, dry_run, &mut stats,
     );
-
-    post_bucket(
-        "bolus",
-        "treatments",
-        &batch.bolus,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
-    post_bucket(
-        "basal",
-        "treatments",
-        &batch.basal,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
+    for (kind, docs) in [
+        ("bolus", &batch.bolus),
+        ("basal", &batch.basal),
+        ("meal", &batch.meal),
+        ("alarm", &batch.alarm),
+        ("sitechange", &batch.sitechange),
+        ("suspend", &batch.suspend),
+        ("resume", &batch.resume),
+        ("looperr", &batch.looperr),
+    ] {
+        post_bucket(kind, "treatments", docs, watermark, ns, dry_run, &mut stats);
+    }
     // Leaving the watermark behind the open basal makes the next sync post it
     // again, and Nightscout updates the doc in place by identifier until the
     // phase closes and lands in `batch.basal`.
@@ -159,67 +136,14 @@ pub fn post_batch(
         && watermark.get("basal").is_none_or(|w| doc.base.date > w)
     {
         match post_one("treatments", doc, ns, dry_run) {
-            Ok(_) => stats.ok += 1,
+            Ok(PostResult::Posted) => stats.ok += 1,
+            Ok(PostResult::DedupSkipped) => stats.skipped += 1,
             Err(e) => {
                 stats.fail += 1;
                 eprintln!("treatments POST failed (kind=basal, open phase): {e:#}");
             }
         }
     }
-    post_bucket(
-        "meal",
-        "treatments",
-        &batch.meal,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
-    post_bucket(
-        "alarm",
-        "treatments",
-        &batch.alarm,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
-    post_bucket(
-        "sitechange",
-        "treatments",
-        &batch.sitechange,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
-    post_bucket(
-        "suspend",
-        "treatments",
-        &batch.suspend,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
-    post_bucket(
-        "resume",
-        "treatments",
-        &batch.resume,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
-    post_bucket(
-        "looperr",
-        "treatments",
-        &batch.looperr,
-        watermark,
-        ns,
-        dry_run,
-        &mut stats,
-    );
     post_bucket(
         "devicestatus",
         "devicestatus",
@@ -306,49 +230,27 @@ fn post_one<T: Serialize + HasBaseDate + DedupKey>(
 ) -> Result<PostResult> {
     let ts = doc.base_date_ms();
 
-    // Cross-tool fuzzy dedup.
-    if !dry_run && let Some(ns) = ns {
-        if let Some((date_ms, insulin)) = doc.bolus_dedup_key() {
-            match ns.has_matching_bolus(
-                date_ms,
-                insulin,
-                BOLUS_DEDUP_WINDOW_MS,
-                BOLUS_DEDUP_EPSILON,
-            ) {
-                Ok(true) => {
-                    log_info!(
-                        "bolus dedup: NS already has a match for insulin={insulin} near date={date_ms}; skipping"
-                    );
-                    return Ok(PostResult::DedupSkipped);
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("bolus dedup lookup failed ({e:#}); posting the record anyway");
-                }
+    if !dry_run
+        && let Some(ns) = ns
+        && let Some(rule) = doc.dedup_rule()
+    {
+        let found = match rule {
+            DedupRule::Bolus(insulin) => {
+                ns.has_matching_bolus(ts, insulin, BOLUS_DEDUP_WINDOW_MS, BOLUS_DEDUP_EPSILON)
             }
-        } else if let Some(event_type) = doc.treatment_dedup_event_type() {
-            match ns.has_matching_treatment(event_type, ts, TREATMENT_DEDUP_WINDOW_MS) {
-                Ok(true) => {
-                    log_info!(
-                        "event dedup: NS already has a {event_type} near date={ts}; skipping"
-                    );
-                    return Ok(PostResult::DedupSkipped);
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("event dedup lookup failed ({e:#}); posting the record anyway");
-                }
+            DedupRule::Event(event_type) => {
+                ns.has_matching_treatment(event_type, ts, TREATMENT_DEDUP_WINDOW_MS)
             }
-        } else if doc.is_temp_basal() {
-            match has_other_temp_basal(ns, ts) {
-                Ok(true) => {
-                    log_info!("basal dedup: NS already has a Temp Basal near date={ts}; skipping");
-                    return Ok(PostResult::DedupSkipped);
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("basal dedup lookup failed ({e:#}); posting the record anyway");
-                }
+            DedupRule::TempBasal => has_other_temp_basal(ns, ts),
+        };
+        match found {
+            Ok(true) => {
+                log_info!("dedup: NS already has a match for {rule:?} near date={ts}; skipping");
+                return Ok(PostResult::DedupSkipped);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("dedup lookup for {rule:?} failed ({e:#}); posting the record anyway");
             }
         }
     }
