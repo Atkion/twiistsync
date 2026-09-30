@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
+use secrecy::SecretString;
 
 use nightscout::NightscoutClient;
 
@@ -45,28 +46,53 @@ pub fn authenticate(
     config: &Config,
     session_path: &Path,
 ) -> Result<CognitoAuthResult> {
-    if let Ok(Some(existing)) = config::load_session(session_path) {
+    let existing = config::load_session(session_path).ok().flatten();
+    if existing.is_some() {
         log_info!("found existing session at {}", session_path.display());
-        match cognito.refresh(&existing.refresh_token) {
-            Ok(resp) => {
-                println!("authenticated via refresh token");
-                let mut result = resp.result;
-                if result.refresh_token.is_none() {
-                    result.refresh_token = Some(existing.refresh_token.clone());
-                }
-                return Ok(result);
-            }
-            Err(e) => {
-                eprintln!("refresh-token login failed ({e:#}); falling back to password auth");
-            }
-        }
     }
+    renew(
+        cognito,
+        config,
+        session_path,
+        existing.as_ref().map(|s| &s.refresh_token),
+    )
+}
 
-    let resp = cognito
-        .login(&config.twiist.username, &config.twiist.password)
-        .context("password login failed")?;
-    let result = resp.result;
-    println!("authenticated via password");
+/// Get fresh tokens via the refresh token, falling back to a password login
+/// when there is none or Cognito rejects it (e.g. it expired), and persist
+/// the resulting session.
+pub fn renew(
+    cognito: &CognitoClient,
+    config: &Config,
+    session_path: &Path,
+    refresh_token: Option<&SecretString>,
+) -> Result<CognitoAuthResult> {
+    let refreshed = refresh_token.and_then(|refresh| match cognito.refresh(refresh) {
+        Ok(resp) => {
+            println!("authenticated via refresh token");
+            let mut result = resp.result;
+            // Cognito only returns a new refresh token when rotation is on.
+            if result.refresh_token.is_none() {
+                result.refresh_token = Some(refresh.clone());
+            }
+            Some(result)
+        }
+        Err(e) => {
+            eprintln!("refresh-token login failed ({e:#}); falling back to password auth");
+            None
+        }
+    });
+
+    let result = match refreshed {
+        Some(result) => result,
+        None => {
+            let resp = cognito
+                .login(&config.twiist.username, &config.twiist.password)
+                .context("password login failed")?;
+            println!("authenticated via password");
+            resp.result
+        }
+    };
     if let Some(session) = SessionFile::from_auth(&result, None)
         && let Err(e) = config::save_session(session_path, &session)
     {

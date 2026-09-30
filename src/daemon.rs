@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use nightscout::NightscoutClient;
 
+use crate::auth;
 use crate::cognito::{CognitoAuthResult, CognitoClient};
-use crate::config::{self, Config, SessionFile};
+use crate::config::Config;
 use crate::convert::EmitFlags;
 use crate::dispatch;
 use crate::log_info;
@@ -101,29 +102,11 @@ pub fn run_daemon(
         let token_age = (Utc::now() - tokens_obtained_at).num_seconds();
         let lifetime = tokens.expires_in as i64;
         if token_age >= lifetime - PROACTIVE_REFRESH_LEAD_SECS {
-            let preserved_refresh = tokens.refresh_token.clone();
-            if let Some(ref refresh) = preserved_refresh {
-                match cognito.refresh(refresh) {
-                    Ok(resp) => {
-                        let new = resp.result;
-                        *tokens = CognitoAuthResult {
-                            refresh_token: preserved_refresh.clone(),
-                            ..new
-                        };
-                        twiist_client.set_access_token(tokens.access_token.clone());
-                        tokens_obtained_at = Utc::now();
-                        if let Some(session) = SessionFile::from_auth(tokens, None)
-                            && let Err(e) = config::save_session(session_path, &session)
-                        {
-                            eprintln!("failed to save session file: {e:#}");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "proactive refresh failed: {e:#}. Will retry on next tick or on 401."
-                        );
-                    }
-                }
+            match renew_session(cognito, config, session_path, tokens, twiist_client) {
+                Ok(()) => tokens_obtained_at = Utc::now(),
+                Err(e) => eprintln!(
+                    "proactive token renewal failed: {e:#}. Will retry on next tick or on 401."
+                ),
             }
         }
 
@@ -138,39 +121,25 @@ pub fn run_daemon(
         ) {
             Ok(stats) => note_upload(&mut last_upload, stats.package_date),
             Err(e) if twiist::is_unauthorized(&e) => {
-                eprintln!("access token expired; refreshing");
-                let preserved_refresh = tokens.refresh_token.clone();
-                if let Some(ref refresh) = preserved_refresh {
-                    match cognito.refresh(refresh) {
-                        Ok(resp) => {
-                            let new = resp.result;
-                            *tokens = CognitoAuthResult {
-                                refresh_token: preserved_refresh.clone(),
-                                ..new
-                            };
-                            twiist_client.set_access_token(tokens.access_token.clone());
-                            tokens_obtained_at = Utc::now();
-                            if let Some(session) = SessionFile::from_auth(tokens, None)
-                                && let Err(e) = config::save_session(session_path, &session)
-                            {
-                                eprintln!("failed to save session file: {e:#}");
-                            }
-                            match dispatch::sync_once(
-                                twiist_client,
-                                ns,
-                                pwd,
-                                dry_run,
-                                dump_to,
-                                &mut watermark,
-                                emit_flags,
-                            ) {
-                                Ok(stats) => note_upload(&mut last_upload, stats.package_date),
-                                Err(e2) => eprintln!("retry after refresh failed: {e2:#}"),
-                            }
+                eprintln!("access token expired; renewing");
+                match renew_session(cognito, config, session_path, tokens, twiist_client) {
+                    Ok(()) => {
+                        tokens_obtained_at = Utc::now();
+                        match dispatch::sync_once(
+                            twiist_client,
+                            ns,
+                            pwd,
+                            dry_run,
+                            dump_to,
+                            &mut watermark,
+                            emit_flags,
+                        ) {
+                            Ok(stats) => note_upload(&mut last_upload, stats.package_date),
+                            Err(e2) => eprintln!("retry after renewal failed: {e2:#}"),
                         }
-                        Err(refresh_err) => {
-                            eprintln!("refresh failed: {refresh_err:#}. Will retry on next tick.");
-                        }
+                    }
+                    Err(renew_err) => {
+                        eprintln!("token renewal failed: {renew_err:#}. Will retry on next tick.");
                     }
                 }
             }
@@ -198,7 +167,8 @@ pub fn run_daemon(
 
         match (align_period_secs, last_upload) {
             (Some(period), Some(upload)) => {
-                let delay = aligned_delay_secs(Utc::now(), upload, period as i64, interval_secs as i64);
+                let delay =
+                    aligned_delay_secs(Utc::now(), upload, period as i64, interval_secs as i64);
                 log_info!("align: last upload {upload}, next poll in {delay}s");
                 thread::sleep(Duration::from_secs(delay as u64));
             }
@@ -211,6 +181,18 @@ pub fn run_daemon(
             }
         }
     }
+}
+
+fn renew_session(
+    cognito: &CognitoClient,
+    config: &Config,
+    session_path: &Path,
+    tokens: &mut CognitoAuthResult,
+    twiist_client: &mut TwiistClient,
+) -> Result<()> {
+    *tokens = auth::renew(cognito, config, session_path, tokens.refresh_token.as_ref())?;
+    twiist_client.set_access_token(tokens.access_token.clone());
+    Ok(())
 }
 
 /// Track the newest upload seen, logging when one arrives so the delay between
@@ -246,8 +228,14 @@ mod tests {
 
     #[test]
     fn a_late_upload_is_retried_on_a_short_cadence() {
-        assert_eq!(aligned_delay_secs(at(305), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
-        assert_eq!(aligned_delay_secs(at(400), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+        assert_eq!(
+            aligned_delay_secs(at(305), at(0), PERIOD, INTERVAL),
+            ALIGN_RETRY_SECS
+        );
+        assert_eq!(
+            aligned_delay_secs(at(400), at(0), PERIOD, INTERVAL),
+            ALIGN_RETRY_SECS
+        );
     }
 
     #[test]
@@ -260,10 +248,16 @@ mod tests {
     fn a_missed_upload_keeps_the_cadence_instead_of_drifting() {
         // The upload due at 300 never came. At 700 the one due at 600 is inside
         // its own retry window, so keep retrying.
-        assert_eq!(aligned_delay_secs(at(700), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+        assert_eq!(
+            aligned_delay_secs(at(700), at(0), PERIOD, INTERVAL),
+            ALIGN_RETRY_SECS
+        );
         // Past that window, the next poll lands at 905, not 300 after now.
         assert_eq!(aligned_delay_secs(at(750), at(0), PERIOD, INTERVAL), 155);
-        assert_eq!(aligned_delay_secs(at(906), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+        assert_eq!(
+            aligned_delay_secs(at(906), at(0), PERIOD, INTERVAL),
+            ALIGN_RETRY_SECS
+        );
     }
 
     #[test]
@@ -280,6 +274,9 @@ mod tests {
     #[test]
     fn a_future_upload_date_waits_rather_than_retrying() {
         // Clock skew: the package claims to be from 20 s in the future.
-        assert_eq!(aligned_delay_secs(at(0), at(20), PERIOD, INTERVAL), INTERVAL);
+        assert_eq!(
+            aligned_delay_secs(at(0), at(20), PERIOD, INTERVAL),
+            INTERVAL
+        );
     }
 }
