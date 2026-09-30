@@ -2,14 +2,11 @@ services:
   twiistsync:
     build: .
     restart: unless-stopped
-    # Overrides the Dockerfile ENTRYPOINT to add --align-period-secs: poll just
-    # after each 300 s pump upload rather than at a phase fixed by container start
-    # time, which had made every reading ~293 s late. --poll-interval-secs is the
-    # longest gap between polls.
-    entrypoint: ["twiistsync", "--daemon", "--config", "/config/config.json",
-                 "--backfill", "7", "--tidepool-refresh-secs", "86400",
-                 "--poll-interval-secs", "300",
-                 "--align-period-secs", "300", "-vv"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - /mnt/user/Docker/twiistsync/config:/config:ro
       - /mnt/user/Docker/twiistsync/data:/data
