@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use uuid::Uuid;
 
@@ -15,11 +15,45 @@ use crate::cognito::{CognitoAuthResult, CognitoClient};
 use crate::config::{self, Config, SessionFile};
 use crate::convert::EmitFlags;
 use crate::dispatch;
+use crate::log_info;
 use crate::tidepool_glue;
 use crate::twiist::{self, TwiistClient};
 use crate::watermark::seed_watermark;
 
 pub const DEFAULT_POLL_SECS: u64 = 300;
+
+/// How long after an expected upload to make the first aligned poll.
+const ALIGN_DELAY_SECS: i64 = 5;
+/// How often to re-poll while an expected upload has not shown up yet.
+const ALIGN_RETRY_SECS: i64 = 10;
+/// How long to keep retrying before waiting for the next expected upload
+/// instead. Bounds the extra API calls while the pump is out of range.
+const ALIGN_RETRY_WINDOW_SECS: i64 = 120;
+
+/// Seconds to sleep before the next aligned poll, capped at `interval_secs`.
+///
+/// Expected uploads fall at `last_upload + k * period` for whole k. Within
+/// ALIGN_RETRY_WINDOW_SECS after one (plus ALIGN_DELAY_SECS), the upload is due
+/// or late, so poll again in ALIGN_RETRY_SECS; otherwise sleep until the next
+/// one is due. Missed uploads keep the same cadence rather than drifting.
+pub fn aligned_delay_secs(
+    now: DateTime<Utc>,
+    last_upload: DateTime<Utc>,
+    period_secs: i64,
+    interval_secs: i64,
+) -> i64 {
+    let since = (now - last_upload).num_seconds();
+    // Seconds into the current period, measured from the first poll slot.
+    let into = (since - period_secs - ALIGN_DELAY_SECS).rem_euclid(period_secs);
+    let delay = if since >= period_secs + ALIGN_DELAY_SECS && into < ALIGN_RETRY_WINDOW_SECS {
+        ALIGN_RETRY_SECS
+    } else if since < period_secs + ALIGN_DELAY_SECS {
+        period_secs + ALIGN_DELAY_SECS - since
+    } else {
+        period_secs - into
+    };
+    delay.clamp(1, interval_secs.max(1))
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_daemon(
@@ -29,6 +63,7 @@ pub fn run_daemon(
     ns: Option<&NightscoutClient>,
     pwd: Uuid,
     interval_secs: u64,
+    align_period_secs: Option<u64>,
     session_path: &Path,
     dry_run: bool,
     dump_to: Option<&Path>,
@@ -48,6 +83,10 @@ pub fn run_daemon(
     if let Some(n) = tidepool_refresh_secs {
         println!("daemon: tidepool top-up every {n}s");
     }
+    if let Some(n) = align_period_secs {
+        println!("daemon: aligning polls to a {n}s pump upload cadence");
+    }
+    let mut last_upload: Option<DateTime<Utc>> = None;
 
     let mut watermark = seed_watermark(Utc::now(), interval_secs as i64, tidepool_seed);
     let mut last_topup = Utc::now();
@@ -97,7 +136,7 @@ pub fn run_daemon(
             &mut watermark,
             emit_flags,
         ) {
-            Ok(_) => {}
+            Ok(stats) => note_upload(&mut last_upload, stats.package_date),
             Err(e) if twiist::is_unauthorized(&e) => {
                 eprintln!("access token expired; refreshing");
                 let preserved_refresh = tokens.refresh_token.clone();
@@ -116,7 +155,7 @@ pub fn run_daemon(
                             {
                                 eprintln!("failed to save session file: {e:#}");
                             }
-                            if let Err(e2) = dispatch::sync_once(
+                            match dispatch::sync_once(
                                 twiist_client,
                                 ns,
                                 pwd,
@@ -125,7 +164,8 @@ pub fn run_daemon(
                                 &mut watermark,
                                 emit_flags,
                             ) {
-                                eprintln!("retry after refresh failed: {e2:#}");
+                                Ok(stats) => note_upload(&mut last_upload, stats.package_date),
+                                Err(e2) => eprintln!("retry after refresh failed: {e2:#}"),
                             }
                         }
                         Err(refresh_err) => {
@@ -156,10 +196,90 @@ pub fn run_daemon(
             }
         }
 
-        // Stable cadence: subtract elapsed from interval.
-        let next = tick_start + interval;
-        if let Some(d) = next.checked_duration_since(Instant::now()) {
-            thread::sleep(d);
+        match (align_period_secs, last_upload) {
+            (Some(period), Some(upload)) => {
+                let delay = aligned_delay_secs(Utc::now(), upload, period as i64, interval_secs as i64);
+                log_info!("align: last upload {upload}, next poll in {delay}s");
+                thread::sleep(Duration::from_secs(delay as u64));
+            }
+            _ => {
+                // Stable cadence: subtract elapsed from interval.
+                let next = tick_start + interval;
+                if let Some(d) = next.checked_duration_since(Instant::now()) {
+                    thread::sleep(d);
+                }
+            }
         }
+    }
+}
+
+/// Track the newest upload seen, logging when one arrives so the delay between
+/// the pump uploading and the follower API serving it can be measured.
+fn note_upload(last_upload: &mut Option<DateTime<Utc>>, package_date: Option<DateTime<Utc>>) {
+    let Some(date) = package_date else { return };
+    if last_upload.is_none_or(|previous| date > previous) {
+        log_info!(
+            "upload {date} served {}s after the pump sent it",
+            (Utc::now() - date).num_seconds()
+        );
+        *last_upload = Some(date);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_790_000_000 + secs, 0).unwrap()
+    }
+
+    const PERIOD: i64 = 300;
+    const INTERVAL: i64 = 300;
+
+    #[test]
+    fn just_after_an_upload_waits_for_the_next_one() {
+        // Upload at 0, now 30 s later: first aligned poll is at 305.
+        assert_eq!(aligned_delay_secs(at(30), at(0), PERIOD, INTERVAL), 275);
+    }
+
+    #[test]
+    fn a_late_upload_is_retried_on_a_short_cadence() {
+        assert_eq!(aligned_delay_secs(at(305), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+        assert_eq!(aligned_delay_secs(at(400), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+    }
+
+    #[test]
+    fn retrying_stops_after_the_window_and_realigns_to_the_next_slot() {
+        // 305 + 120 = 425 ends the window; the next slot is 605.
+        assert_eq!(aligned_delay_secs(at(425), at(0), PERIOD, INTERVAL), 180);
+    }
+
+    #[test]
+    fn a_missed_upload_keeps_the_cadence_instead_of_drifting() {
+        // The upload due at 300 never came. At 700 the one due at 600 is inside
+        // its own retry window, so keep retrying.
+        assert_eq!(aligned_delay_secs(at(700), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+        // Past that window, the next poll lands at 905, not 300 after now.
+        assert_eq!(aligned_delay_secs(at(750), at(0), PERIOD, INTERVAL), 155);
+        assert_eq!(aligned_delay_secs(at(906), at(0), PERIOD, INTERVAL), ALIGN_RETRY_SECS);
+    }
+
+    #[test]
+    fn never_sleeps_longer_than_the_poll_interval() {
+        assert_eq!(aligned_delay_secs(at(30), at(0), PERIOD, 60), 60);
+    }
+
+    #[test]
+    fn never_busy_loops() {
+        assert!(aligned_delay_secs(at(305), at(0), PERIOD, INTERVAL) >= 1);
+        assert_eq!(aligned_delay_secs(at(304), at(0), PERIOD, INTERVAL), 1);
+    }
+
+    #[test]
+    fn a_future_upload_date_waits_rather_than_retrying() {
+        // Clock skew: the package claims to be from 20 s in the future.
+        assert_eq!(aligned_delay_secs(at(0), at(20), PERIOD, INTERVAL), INTERVAL);
     }
 }

@@ -160,6 +160,9 @@ fn run_live(cli: &Cli, config: &Config, emit_flags: convert::EmitFlags) -> Resul
     if interval_secs == 0 {
         bail!("poll interval must be greater than zero");
     }
+    if cli.align_period_secs == Some(0) {
+        bail!("--align-period-secs must be greater than zero");
+    }
     if cli.tidepool_refresh_secs == Some(0) {
         bail!("--tidepool-refresh-secs must be greater than zero");
     }
@@ -224,6 +227,7 @@ fn run_live(cli: &Cli, config: &Config, emit_flags: convert::EmitFlags) -> Resul
             ns.as_ref(),
             config.twiist.pwd_uuid,
             interval_secs,
+            cli.align_period_secs,
             &session_path,
             cli.dry_run,
             cli.dump_package.as_deref(),

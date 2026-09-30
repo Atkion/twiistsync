@@ -22,9 +22,17 @@ pub struct Cli {
     #[arg(long)]
     pub daemon: bool,
 
-    /// Daemon poll interval in seconds.
+    /// Daemon poll interval in seconds. With --align-period-secs this is the
+    /// longest the daemon will go between polls.
     #[arg(long)]
     pub poll_interval_secs: Option<u64>,
+
+    /// Align polls to the pump's upload cadence, in seconds (the Twiist uploads
+    /// every 300). Each poll lands just after the next expected upload instead
+    /// of at a phase fixed by when the daemon started, which can otherwise add
+    /// nearly a whole interval of delay to every reading.
+    #[arg(long, value_name = "SECS")]
+    pub align_period_secs: Option<u64>,
 
     #[arg(long)]
     pub once: bool,

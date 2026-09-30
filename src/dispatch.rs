@@ -75,6 +75,9 @@ pub struct SyncStats {
     pub ok: usize,
     pub fail: usize,
     pub skipped: usize,
+    /// `status.date` of the package this sync read: when the pump last
+    /// uploaded. The daemon aligns its polls to it with --align-period-secs.
+    pub package_date: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub fn sync_once(
@@ -100,7 +103,9 @@ pub fn sync_once(
     }
     let pkg: Package = serde_json::from_slice(&raw)
         .context("follower-service /pwd/<uuid>/package response wasn't a Package")?;
-    post_batch(&pkg, ns, dry_run, watermark, emit_flags)
+    let mut stats = post_batch(&pkg, ns, dry_run, watermark, emit_flags)?;
+    stats.package_date = pkg.status.date;
+    Ok(stats)
 }
 
 /// Convert and post one package, filtered by per-kind watermark.
