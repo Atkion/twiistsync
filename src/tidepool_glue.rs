@@ -52,14 +52,14 @@ pub fn do_tidepool_backfill(
     };
     let stats = tidepoolsync::sync::sync_once(&tp, patient_uid, ns, &opts)?;
     eprintln!(
-        "backfill: fetched={} entries={}/{} treatments={}/{} skipped={} bolus_dedup_skipped={} convert_errors={}",
+        "backfill: fetched={} entries={}/{} treatments={}/{} skipped={} dedup_skipped={} convert_errors={}",
         stats.fetched,
         stats.entries_ok,
         stats.entries_ok + stats.entries_fail,
         stats.treatments_ok,
         stats.treatments_ok + stats.treatments_fail,
         stats.skipped,
-        stats.bolus_dedup_skipped,
+        stats.dedup_skipped,
         stats.convert_errors,
     );
     Ok(stats)

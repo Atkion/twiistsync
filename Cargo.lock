@@ -1668,7 +1668,7 @@ dependencies = [
 [[package]]
 name = "tidepoolsync"
 version = "0.1.0"
-source = "git+https://github.com/Atkion/tidepoolsync.git?rev=cdcbe9f71217baee6aeee97ae8f31c0d2f6829bc#cdcbe9f71217baee6aeee97ae8f31c0d2f6829bc"
+source = "git+https://github.com/Atkion/tidepoolsync.git?rev=088f83c7333f968d206c1d9d1fe85ee8289c5a82#088f83c7333f968d206c1d9d1fe85ee8289c5a82"
 dependencies = [
  "anyhow",
  "atomic-write-file",
