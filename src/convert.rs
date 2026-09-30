@@ -334,31 +334,38 @@ fn insulin_dose_to_treatment(
     let dose_lower = dose.dose_type.as_deref().unwrap_or("").to_ascii_lowercase();
 
     match dose_lower.as_str() {
-        "bolus" => Some(InsulinConversion::Bolus(Treatment {
-            base: base(format!("bolus-{epoch_s}"), start, device),
-            // There is no reliable meal linkage here, so this stays a
-            // Correction Bolus. Food is emitted separately.
-            event_type: Some("Correction Bolus".to_string()),
-            glucose: None,
-            glucose_type: None,
-            units: None,
-            carbs: None,
-            protein: None,
-            fat: None,
-            insulin: dose.value,
-            duration: Some(Decimal::ZERO),
-            pre_bolus: None,
-            split_now: None,
-            split_ext: None,
-            percent: None,
-            absolute: None,
-            target_top: None,
-            target_bottom: None,
-            profile: None,
-            reason: None,
-            notes: None,
-            entered_by: Some(APP_NAME.to_string()),
-        })),
+        "bolus" => {
+            let delivery_start = bolus_delivery_start(start, dose.end_date);
+            Some(InsulinConversion::Bolus(Treatment {
+                base: base(
+                    format!("bolus-{}", delivery_start.timestamp()),
+                    delivery_start,
+                    device,
+                ),
+                // There is no reliable meal linkage here, so this stays a
+                // Correction Bolus. Food is emitted separately.
+                event_type: Some("Correction Bolus".to_string()),
+                glucose: None,
+                glucose_type: None,
+                units: None,
+                carbs: None,
+                protein: None,
+                fat: None,
+                insulin: dose.value,
+                duration: Some(Decimal::ZERO),
+                pre_bolus: None,
+                split_now: None,
+                split_ext: None,
+                percent: None,
+                absolute: None,
+                target_top: None,
+                target_bottom: None,
+                profile: None,
+                reason: None,
+                notes: None,
+                entered_by: Some(APP_NAME.to_string()),
+            }))
+        }
         "basal" | "tempbasal" => {
             let end = dose.end_date.unwrap_or(start);
             let duration = duration_minutes(start, end);
@@ -433,6 +440,18 @@ fn insulin_dose_to_treatment(
             entered_by: Some(APP_NAME.to_string()),
         })),
         _ => None,
+    }
+}
+
+/// Twiist reports a bolus's `startDate` as the moment delivery finished,
+/// with `endDate` one delivery duration after that. The real start (which
+/// Tidepool and the pump user agree on) is therefore one duration before
+/// `startDate`. Matching Tidepool's time lets the ±2 min fuzzy bolus dedup
+/// catch the same bolus arriving from both sources.
+fn bolus_delivery_start(start: DateTime<Utc>, end: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    match end {
+        Some(end) if end > start => start - (end - start),
+        _ => start,
     }
 }
 
@@ -952,5 +971,40 @@ mod tests {
         assert!(ds.pump.is_some());
         // newest is iob_ts (19:50:00), ahead of both cob_ts and pkg_ts.
         assert_eq!(ds.base.date, iob_ts.timestamp_millis());
+    }
+
+    fn bolus_from(json: &str) -> Treatment {
+        let dose: InsulinDose = serde_json::from_str(json).unwrap();
+        match insulin_dose_to_treatment(&dose, &device()) {
+            Some(InsulinConversion::Bolus(t)) => t,
+            _ => panic!("expected a bolus"),
+        }
+    }
+
+    #[test]
+    fn bolus_is_dated_one_delivery_duration_before_twiist_start() {
+        // Real 6.26 U bolus; Tidepool recorded it at 19:37:44Z.
+        let t = bolus_from(
+            r#"{"value":"6.26","endDate":"2026-09-30T19:46:47Z","doseType":"Bolus","startDate":"2026-09-30T19:42:15Z","valueUnit":"U","identifier":"110552"}"#,
+        );
+        let expected = Utc.with_ymd_and_hms(2026, 9, 30, 19, 37, 43).unwrap();
+        assert_eq!(t.base.date, expected.timestamp_millis());
+        assert_eq!(
+            t.base.identifier.as_deref(),
+            Some(format!("bolus-{}", expected.timestamp()).as_str())
+        );
+        assert_eq!(t.insulin, Some(dec!(6.26)));
+    }
+
+    #[test]
+    fn bolus_without_usable_end_date_keeps_twiist_start() {
+        let start = Utc.with_ymd_and_hms(2026, 4, 19, 11, 50, 0).unwrap();
+        for json in [
+            r#"{"value":"1.0","doseType":"Bolus","startDate":"2026-04-19T11:50:00Z","valueUnit":"U"}"#,
+            r#"{"value":"1.0","endDate":"2026-04-19T11:50:00Z","doseType":"Bolus","startDate":"2026-04-19T11:50:00Z","valueUnit":"U"}"#,
+            r#"{"value":"1.0","endDate":"2026-04-19T11:49:00Z","doseType":"Bolus","startDate":"2026-04-19T11:50:00Z","valueUnit":"U"}"#,
+        ] {
+            assert_eq!(bolus_from(json).base.date, start.timestamp_millis());
+        }
     }
 }
