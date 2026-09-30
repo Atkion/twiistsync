@@ -16,3 +16,6 @@
 .DS_Store
 .direnv/
 **/*.swp
+/config/*
+/data/
+docker-compose.yml.bak-*

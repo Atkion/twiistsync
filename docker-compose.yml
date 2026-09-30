@@ -1,0 +1,13 @@
+services:
+  twiistsync:
+    build: .
+    restart: unless-stopped
+    # Overrides the Dockerfile ENTRYPOINT only to add --poll-interval-secs. At the
+    # default 300 s the poll phase is fixed by container start time, and it had
+    # settled 7 s before the pump reading slot, so every reading landed ~293 s late.
+    entrypoint: ["twiistsync", "--daemon", "--config", "/config/config.json",
+                 "--backfill", "7", "--tidepool-refresh-secs", "86400",
+                 "--poll-interval-secs", "60", "-vv"]
+    volumes:
+      - /mnt/user/Docker/twiistsync/config:/config:ro
+      - /mnt/user/Docker/twiistsync/data:/data
