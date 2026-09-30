@@ -208,6 +208,34 @@ fn base(identifier: String, date: DateTime<Utc>, device: &Option<String>) -> Doc
     }
 }
 
+/// A TwiistSync treatment with every optional field empty, for struct-update
+/// syntax.
+fn treatment(base: DocumentBase, event_type: &str) -> Treatment {
+    Treatment {
+        base,
+        event_type: Some(event_type.to_string()),
+        glucose: None,
+        glucose_type: None,
+        units: None,
+        carbs: None,
+        protein: None,
+        fat: None,
+        insulin: None,
+        duration: None,
+        pre_bolus: None,
+        split_now: None,
+        split_ext: None,
+        percent: None,
+        absolute: None,
+        target_top: None,
+        target_bottom: None,
+        profile: None,
+        reason: None,
+        notes: None,
+        entered_by: Some(APP_NAME.to_string()),
+    }
+}
+
 // Glucose.
 
 /// Decode `glucoseHistory` into Nightscout entries.
@@ -342,109 +370,43 @@ fn insulin_dose_to_treatment(
     match dose_lower.as_str() {
         "bolus" => {
             let delivery_start = bolus_delivery_start(start, dose.end_date);
-            Some(InsulinConversion::Bolus(Treatment {
-                base: base(
-                    format!("bolus-{}", delivery_start.timestamp()),
-                    delivery_start,
-                    device,
-                ),
+            Some(InsulinConversion::Bolus(
                 // There is no reliable meal linkage here, so this stays a
                 // Correction Bolus. Food is emitted separately.
-                event_type: Some("Correction Bolus".to_string()),
-                glucose: None,
-                glucose_type: None,
-                units: None,
-                carbs: None,
-                protein: None,
-                fat: None,
-                insulin: dose.value,
-                duration: Some(Decimal::ZERO),
-                pre_bolus: None,
-                split_now: None,
-                split_ext: None,
-                percent: None,
-                absolute: None,
-                target_top: None,
-                target_bottom: None,
-                profile: None,
-                reason: None,
-                notes: None,
-                entered_by: Some(APP_NAME.to_string()),
-            }))
+                Treatment {
+                    insulin: dose.value,
+                    duration: Some(Decimal::ZERO),
+                    ..treatment(
+                        base(
+                            format!("bolus-{}", delivery_start.timestamp()),
+                            delivery_start,
+                            device,
+                        ),
+                        "Correction Bolus",
+                    )
+                },
+            ))
         }
         "basal" | "tempbasal" => {
             let end = dose.end_date.unwrap_or(start);
             let duration = duration_minutes(start, end);
             Some(InsulinConversion::Basal(Treatment {
-                base: base(format!("basal-{epoch_s}"), start, device),
-                event_type: Some("Temp Basal".to_string()),
-                glucose: None,
-                glucose_type: None,
-                units: None,
-                carbs: None,
-                protein: None,
-                fat: None,
-                insulin: None,
                 duration: Some(duration),
-                pre_bolus: None,
-                split_now: None,
-                split_ext: None,
-                percent: None,
                 absolute: dose.value,
-                target_top: None,
-                target_bottom: None,
-                profile: None,
-                reason: None,
-                notes: None,
-                entered_by: Some(APP_NAME.to_string()),
+                ..treatment(
+                    base(format!("basal-{epoch_s}"), start, device),
+                    "Temp Basal",
+                )
             }))
         }
-        "suspend" => Some(InsulinConversion::Suspend(Treatment {
-            base: base(format!("suspend-{epoch_s}"), start, device),
-            event_type: Some("Suspend Pump".to_string()),
-            glucose: None,
-            glucose_type: None,
-            units: None,
-            carbs: None,
-            protein: None,
-            fat: None,
-            insulin: None,
-            duration: None,
-            pre_bolus: None,
-            split_now: None,
-            split_ext: None,
-            percent: None,
-            absolute: None,
-            target_top: None,
-            target_bottom: None,
-            profile: None,
-            reason: None,
-            notes: None,
-            entered_by: Some(APP_NAME.to_string()),
-        })),
-        "resume" => Some(InsulinConversion::Resume(Treatment {
-            base: base(format!("resume-{epoch_s}"), start, device),
-            event_type: Some("Resume Pump".to_string()),
-            glucose: None,
-            glucose_type: None,
-            units: None,
-            carbs: None,
-            protein: None,
-            fat: None,
-            insulin: None,
-            duration: None,
-            pre_bolus: None,
-            split_now: None,
-            split_ext: None,
-            percent: None,
-            absolute: None,
-            target_top: None,
-            target_bottom: None,
-            profile: None,
-            reason: None,
-            notes: None,
-            entered_by: Some(APP_NAME.to_string()),
-        })),
+        "suspend" => Some(InsulinConversion::Suspend(treatment(
+            base(format!("suspend-{epoch_s}"), start, device),
+            "Suspend Pump",
+        ))),
+        "resume" => Some(InsulinConversion::Resume(treatment(
+            base(format!("resume-{epoch_s}"), start, device),
+            "Resume Pump",
+        ))),
         _ => None,
     }
 }
@@ -497,27 +459,9 @@ fn insulin_delivery_to_phase_treatments(
         .map(|phase| {
             let identifier = format!("basal-{}", phase.start.timestamp());
             Treatment {
-                base: base(identifier, phase.start, device),
-                event_type: Some("Temp Basal".to_string()),
-                glucose: None,
-                glucose_type: None,
-                units: None,
-                carbs: None,
-                protein: None,
-                fat: None,
-                insulin: None,
                 duration: Some(phase.duration_minutes()),
-                pre_bolus: None,
-                split_now: None,
-                split_ext: None,
-                percent: None,
                 absolute: Some(phase.rate_u_per_hr),
-                target_top: None,
-                target_bottom: None,
-                profile: None,
-                reason: None,
-                notes: None,
-                entered_by: Some(APP_NAME.to_string()),
+                ..treatment(base(identifier, phase.start, device), "Temp Basal")
             }
         })
         .collect()
@@ -564,27 +508,10 @@ fn meal_to_treatment(meal: &Meal, device: &Option<String>) -> Option<Treatment> 
     // separately from `insulinHistory`; using "Meal Bolus" here too
     // would double-count insulin in Nightscout reports.
     Some(Treatment {
-        base: base(identifier, date, device),
-        event_type: Some("Carb Correction".to_string()),
-        glucose: None,
-        glucose_type: None,
-        units: None,
         carbs: Some(grams),
-        protein: None,
-        fat: None,
-        insulin: None,
         duration: duration_min,
-        pre_bolus: None,
-        split_now: None,
-        split_ext: None,
-        percent: None,
-        absolute: None,
-        target_top: None,
-        target_bottom: None,
-        profile: None,
         reason: meal.food_type.clone(),
-        notes: None,
-        entered_by: Some(APP_NAME.to_string()),
+        ..treatment(base(identifier, date, device), "Carb Correction")
     })
 }
 
@@ -615,27 +542,9 @@ fn event_to_treatment(ev: &Event, device: &Option<String>) -> Option<Treatment> 
     };
 
     Some(Treatment {
-        base: base(identifier, ts, device),
-        event_type: Some("Announcement".to_string()),
-        glucose: None,
-        glucose_type: None,
-        units: None,
-        carbs: None,
-        protein: None,
-        fat: None,
-        insulin: None,
-        duration: None,
-        pre_bolus: None,
-        split_now: None,
-        split_ext: None,
-        percent: None,
-        absolute: None,
-        target_top: None,
-        target_bottom: None,
-        profile: None,
         reason: ev.id.clone().or_else(|| Some(ty.to_string())),
         notes: Some(notes),
-        entered_by: Some(APP_NAME.to_string()),
+        ..treatment(base(identifier, ts, device), "Announcement")
     })
 }
 
@@ -648,27 +557,8 @@ fn cassette_change_to_treatment(summary: &Summary, device: &Option<String>) -> O
     // Tidepool also emits `Insulin Change` for this cassette change.
     // We keep Twiist as `Site Change`; the semantics differ.
     Some(Treatment {
-        base: base(identifier, date, device),
-        event_type: Some("Site Change".to_string()),
-        glucose: None,
-        glucose_type: None,
-        units: None,
-        carbs: None,
-        protein: None,
-        fat: None,
-        insulin: None,
-        duration: None,
-        pre_bolus: None,
-        split_now: None,
-        split_ext: None,
-        percent: None,
-        absolute: None,
-        target_top: None,
-        target_bottom: None,
-        profile: None,
-        reason: None,
         notes: Some("Twiist cassette change".to_string()),
-        entered_by: Some(APP_NAME.to_string()),
+        ..treatment(base(identifier, date, device), "Site Change")
     })
 }
 
@@ -764,27 +654,9 @@ fn loop_error_to_treatment(algo: &LoopAlgorithm, device: &Option<String>) -> Opt
     let identifier = format!("twiist-looperr-{}", date.timestamp());
 
     Some(Treatment {
-        base: base(identifier, date, device),
-        event_type: Some("Note".to_string()),
-        glucose: None,
-        glucose_type: None,
-        units: None,
-        carbs: None,
-        protein: None,
-        fat: None,
-        insulin: None,
-        duration: None,
-        pre_bolus: None,
-        split_now: None,
-        split_ext: None,
-        percent: None,
-        absolute: None,
-        target_top: None,
-        target_bottom: None,
-        profile: None,
         reason: Some("loop error".to_string()),
         notes: Some(err.to_string()),
-        entered_by: Some(APP_NAME.to_string()),
+        ..treatment(base(identifier, date, device), "Note")
     })
 }
 
