@@ -220,17 +220,18 @@ fn run_live(cli: &Cli, config: &Config, emit_flags: convert::EmitFlags) -> Resul
             &mut tokens,
             &mut twiist_client,
             ns.as_ref(),
-            config.twiist.pwd_uuid,
-            interval_secs,
-            cli.align_period_secs,
-            &session_path,
-            cli.dry_run,
-            cli.dump_package.as_deref(),
-            emit_flags,
-            cli.tidepool_refresh_secs,
             config,
-            &tidepool_watermark,
             http.clone(),
+            &daemon::DaemonOptions {
+                interval_secs,
+                align_period_secs: cli.align_period_secs,
+                tidepool_refresh_secs: cli.tidepool_refresh_secs,
+                dry_run: cli.dry_run,
+                dump_to: cli.dump_package.as_deref(),
+                emit_flags,
+                session_path: &session_path,
+                tidepool_watermark_path: &tidepool_watermark,
+            },
         )
     } else {
         let mut wm = Watermark::none();

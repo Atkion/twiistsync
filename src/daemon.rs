@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
-use uuid::Uuid;
 
 use nightscout::NightscoutClient;
 
@@ -56,34 +55,38 @@ pub fn aligned_delay_secs(
     delay.clamp(1, interval_secs.max(1))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Daemon settings that stay fixed for the life of the process.
+pub struct DaemonOptions<'a> {
+    pub interval_secs: u64,
+    pub align_period_secs: Option<u64>,
+    pub tidepool_refresh_secs: Option<u64>,
+    pub dry_run: bool,
+    pub dump_to: Option<&'a Path>,
+    pub emit_flags: EmitFlags,
+    pub session_path: &'a Path,
+    pub tidepool_watermark_path: &'a Path,
+}
+
 pub fn run_daemon(
     cognito: &CognitoClient,
     tokens: &mut CognitoAuthResult,
     twiist_client: &mut TwiistClient,
     ns: Option<&NightscoutClient>,
-    pwd: Uuid,
-    interval_secs: u64,
-    align_period_secs: Option<u64>,
-    session_path: &Path,
-    dry_run: bool,
-    dump_to: Option<&Path>,
-    emit_flags: EmitFlags,
-    tidepool_refresh_secs: Option<u64>,
     config: &Config,
-    tidepool_watermark_path: &Path,
     http: Client,
+    opts: &DaemonOptions<'_>,
 ) -> Result<()> {
-    let interval = Duration::from_secs(interval_secs);
+    let interval = Duration::from_secs(opts.interval_secs);
     println!(
-        "daemon: polling every {}s for pwd {pwd}{}",
-        interval_secs,
-        if dry_run { " (DRY RUN)" } else { "" }
+        "daemon: polling every {}s for pwd {}{}",
+        opts.interval_secs,
+        config.twiist.pwd_uuid,
+        if opts.dry_run { " (DRY RUN)" } else { "" }
     );
-    if let Some(n) = tidepool_refresh_secs {
+    if let Some(n) = opts.tidepool_refresh_secs {
         println!("daemon: tidepool top-up every {n}s");
     }
-    if let Some(n) = align_period_secs {
+    if let Some(n) = opts.align_period_secs {
         println!("daemon: aligning polls to a {n}s pump upload cadence");
     }
     let mut last_upload: Option<DateTime<Utc>> = None;
@@ -101,7 +104,7 @@ pub fn run_daemon(
         let token_age = (Utc::now() - tokens_obtained_at).num_seconds();
         let lifetime = tokens.expires_in as i64;
         if token_age >= lifetime - PROACTIVE_REFRESH_LEAD_SECS {
-            match renew_session(cognito, config, session_path, tokens, twiist_client) {
+            match renew_session(cognito, config, opts.session_path, tokens, twiist_client) {
                 Ok(()) => tokens_obtained_at = Utc::now(),
                 Err(e) => eprintln!(
                     "proactive token renewal failed: {e:#}. Will retry on next tick or on 401."
@@ -112,26 +115,26 @@ pub fn run_daemon(
         match dispatch::sync_once(
             twiist_client,
             ns,
-            pwd,
-            dry_run,
-            dump_to,
+            config.twiist.pwd_uuid,
+            opts.dry_run,
+            opts.dump_to,
             &mut watermark,
-            emit_flags,
+            opts.emit_flags,
         ) {
             Ok(stats) => note_upload(&mut last_upload, stats.package_date),
             Err(e) if twiist::is_unauthorized(&e) => {
                 eprintln!("access token expired; renewing");
-                match renew_session(cognito, config, session_path, tokens, twiist_client) {
+                match renew_session(cognito, config, opts.session_path, tokens, twiist_client) {
                     Ok(()) => {
                         tokens_obtained_at = Utc::now();
                         match dispatch::sync_once(
                             twiist_client,
                             ns,
-                            pwd,
-                            dry_run,
-                            dump_to,
+                            config.twiist.pwd_uuid,
+                            opts.dry_run,
+                            opts.dump_to,
                             &mut watermark,
-                            emit_flags,
+                            opts.emit_flags,
                         ) {
                             Ok(stats) => note_upload(&mut last_upload, stats.package_date),
                             Err(e2) => eprintln!("retry after renewal failed: {e2:#}"),
@@ -147,7 +150,7 @@ pub fn run_daemon(
             }
         }
 
-        if let Some(n) = tidepool_refresh_secs
+        if let Some(n) = opts.tidepool_refresh_secs
             && (Utc::now() - last_topup).num_seconds() >= n as i64
         {
             match tidepool_glue::do_tidepool_backfill(
@@ -155,8 +158,8 @@ pub fn run_daemon(
                 // The sidecar watermark wins after the first run.
                 1,
                 ns,
-                dry_run,
-                tidepool_watermark_path,
+                opts.dry_run,
+                opts.tidepool_watermark_path,
                 http.clone(),
             ) {
                 Ok(_) => last_topup = Utc::now(),
@@ -164,10 +167,14 @@ pub fn run_daemon(
             }
         }
 
-        match (align_period_secs, last_upload) {
+        match (opts.align_period_secs, last_upload) {
             (Some(period), Some(upload)) => {
-                let delay =
-                    aligned_delay_secs(Utc::now(), upload, period as i64, interval_secs as i64);
+                let delay = aligned_delay_secs(
+                    Utc::now(),
+                    upload,
+                    period as i64,
+                    opts.interval_secs as i64,
+                );
                 log_info!("align: last upload {upload}, next poll in {delay}s");
                 thread::sleep(Duration::from_secs(delay as u64));
             }
