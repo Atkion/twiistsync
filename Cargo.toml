@@ -13,7 +13,8 @@ path = "src/main.rs"
 [dependencies]
 nightscout = { git = "https://github.com/E-Allie/nightscout-rs.git", rev = "26d903b8aed1f43f9cdc1e58cf2e4ac7bae9f82d" }
 tidepool = { git = "https://github.com/E-Allie/tidepool-rs.git", rev = "5d41d88605ae6d6856f38fdbd10e6a85dd9ff630" }
-tidepoolsync = { git = "https://github.com/E-Allie/tidepoolsync.git", rev = "73c5079481c2cce8aca5e1101499e865891c2300" }
+# Fork of E-Allie/tidepoolsync; see its `local` branch. Never upstreamed.
+tidepoolsync = { git = "https://github.com/Atkion/tidepoolsync.git", rev = "cdcbe9f71217baee6aeee97ae8f31c0d2f6829bc" }
 anyhow = "1.0.102"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }

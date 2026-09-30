@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use nightscout::NightscoutClient;
 use nightscout::client::{BOLUS_DEDUP_EPSILON, BOLUS_DEDUP_WINDOW_MS, TREATMENT_DEDUP_WINDOW_MS};
+use tidepoolsync::sync::TEMP_BASAL_DEDUP_WINDOW_MS;
 
 use crate::convert::{self, EmitFlags};
 use crate::log_info;
@@ -36,6 +37,7 @@ impl HasBaseDate for nightscout::Devicestatus {
 pub trait DedupKey {
     fn bolus_dedup_key(&self) -> Option<(i64, Decimal)>;
     fn treatment_dedup_event_type(&self) -> Option<&'static str>;
+    fn is_temp_basal(&self) -> bool;
 }
 impl DedupKey for nightscout::Entry {
     fn bolus_dedup_key(&self) -> Option<(i64, Decimal)> {
@@ -44,6 +46,9 @@ impl DedupKey for nightscout::Entry {
     fn treatment_dedup_event_type(&self) -> Option<&'static str> {
         None
     }
+    fn is_temp_basal(&self) -> bool {
+        false
+    }
 }
 impl DedupKey for nightscout::Devicestatus {
     fn bolus_dedup_key(&self) -> Option<(i64, Decimal)> {
@@ -51,6 +56,9 @@ impl DedupKey for nightscout::Devicestatus {
     }
     fn treatment_dedup_event_type(&self) -> Option<&'static str> {
         None
+    }
+    fn is_temp_basal(&self) -> bool {
+        false
     }
 }
 impl DedupKey for nightscout::Treatment {
@@ -67,6 +75,9 @@ impl DedupKey for nightscout::Treatment {
         } else {
             self.dedup_event_type()
         }
+    }
+    fn is_temp_basal(&self) -> bool {
+        self.event_type.as_deref() == Some("Temp Basal")
     }
 }
 
@@ -328,10 +339,32 @@ fn post_one<T: Serialize + HasBaseDate + DedupKey>(
                     eprintln!("event dedup lookup failed ({e:#}); posting the record anyway");
                 }
             }
+        } else if doc.is_temp_basal() {
+            match has_other_temp_basal(ns, ts) {
+                Ok(true) => {
+                    log_info!("basal dedup: NS already has a Temp Basal near date={ts}; skipping");
+                    return Ok(PostResult::DedupSkipped);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("basal dedup lookup failed ({e:#}); posting the record anyway");
+                }
+            }
         }
     }
 
     dispatch(collection, doc, ns, dry_run).map(|()| PostResult::Posted)
+}
+
+/// Look for a Temp Basal from another source within
+/// TEMP_BASAL_DEDUP_WINDOW_MS of `date_ms`. `date_ms` itself is left out of
+/// the search so the open phase's own earlier post doesn't block its update.
+fn has_other_temp_basal(ns: &NightscoutClient, date_ms: i64) -> Result<bool> {
+    let half = TEMP_BASAL_DEDUP_WINDOW_MS / 2;
+    Ok(
+        ns.has_matching_treatment("Temp Basal", date_ms - half - 1, half)?
+            || ns.has_matching_treatment("Temp Basal", date_ms + half + 1, half)?,
+    )
 }
 
 fn dispatch<T: Serialize>(
