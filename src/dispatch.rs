@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use nightscout::NightscoutClient;
 use nightscout::client::{BOLUS_DEDUP_EPSILON, BOLUS_DEDUP_WINDOW_MS, TREATMENT_DEDUP_WINDOW_MS};
+use tidepoolsync::ns_doc::EntryDocument;
 use tidepoolsync::sync::TEMP_BASAL_DEDUP_WINDOW_MS;
 
 use crate::convert::{self, EmitFlags};
@@ -19,9 +20,9 @@ use crate::watermark::Watermark;
 pub trait HasBaseDate {
     fn base_date_ms(&self) -> i64;
 }
-impl HasBaseDate for nightscout::Entry {
+impl HasBaseDate for EntryDocument<'_> {
     fn base_date_ms(&self) -> i64 {
-        self.base.date
+        self.0.base.date
     }
 }
 impl HasBaseDate for nightscout::Treatment {
@@ -52,7 +53,7 @@ pub trait DedupKey {
         None
     }
 }
-impl DedupKey for nightscout::Entry {}
+impl DedupKey for EntryDocument<'_> {}
 impl DedupKey for Devicestatus {}
 impl DedupKey for nightscout::Treatment {
     fn dedup_rule(&self) -> Option<DedupRule> {
@@ -115,8 +116,9 @@ pub fn post_batch(
     let batch = convert::convert_package(pkg, emit_flags);
     let mut stats = SyncStats::default();
 
+    let cgm_docs: Vec<EntryDocument<'_>> = batch.cgm.iter().map(EntryDocument).collect();
     post_bucket(
-        "cgm", "entries", &batch.cgm, watermark, ns, dry_run, &mut stats,
+        "cgm", "entries", &cgm_docs, watermark, ns, dry_run, &mut stats,
     );
     for (kind, docs) in [
         ("bolus", &batch.bolus),
@@ -334,7 +336,8 @@ mod tests {
 
     #[test]
     fn post_bucket_sorts_and_advances_after_successful_groups() {
-        let docs = vec![entry(2_000), entry(1_000), entry(1_000)];
+        let entries = [entry(2_000), entry(1_000), entry(1_000)];
+        let docs: Vec<EntryDocument<'_>> = entries.iter().map(EntryDocument).collect();
         let mut watermark = Watermark::none();
         let mut stats = SyncStats::default();
 
@@ -354,7 +357,8 @@ mod tests {
 
     #[test]
     fn post_bucket_skips_at_or_before_watermark() {
-        let docs = vec![entry(500), entry(1_500)];
+        let entries = [entry(500), entry(1_500)];
+        let docs: Vec<EntryDocument<'_>> = entries.iter().map(EntryDocument).collect();
         let mut watermark = Watermark::none();
         watermark.set("cgm", 1_000);
         let mut stats = SyncStats::default();
@@ -376,7 +380,8 @@ mod tests {
 
     #[test]
     fn post_bucket_does_not_advance_after_post_failure() {
-        let docs = vec![entry(1_000), entry(2_000)];
+        let entries = [entry(1_000), entry(2_000)];
+        let docs: Vec<EntryDocument<'_>> = entries.iter().map(EntryDocument).collect();
         let ns = NightscoutClient::new("http://127.0.0.1".to_string(), "role".to_string());
         let mut watermark = Watermark::none();
         let mut stats = SyncStats::default();
