@@ -12,6 +12,7 @@ use tidepoolsync::sync::TEMP_BASAL_DEDUP_WINDOW_MS;
 use crate::convert::{self, EmitFlags};
 use crate::log_info;
 use crate::models::Package;
+use crate::ns_docs::Devicestatus;
 use crate::twiist::TwiistClient;
 use crate::watermark::Watermark;
 
@@ -28,7 +29,7 @@ impl HasBaseDate for nightscout::Treatment {
         self.base.date
     }
 }
-impl HasBaseDate for nightscout::Devicestatus {
+impl HasBaseDate for Devicestatus {
     fn base_date_ms(&self) -> i64 {
         self.base.date
     }
@@ -52,7 +53,7 @@ pub trait DedupKey {
     }
 }
 impl DedupKey for nightscout::Entry {}
-impl DedupKey for nightscout::Devicestatus {}
+impl DedupKey for Devicestatus {}
 impl DedupKey for nightscout::Treatment {
     fn dedup_rule(&self) -> Option<DedupRule> {
         if self.is_bolus() {

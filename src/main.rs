@@ -23,6 +23,7 @@ mod dispatch;
 mod dump_blobs;
 pub mod log;
 mod models;
+mod ns_docs;
 mod tidepool_glue;
 mod twiist;
 mod watermark;

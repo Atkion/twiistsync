@@ -10,16 +10,15 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
-use nightscout::{
-    Devicestatus, DocumentBase, Entry, LoopCob, LoopIob, LoopStatus, PumpBattery, PumpStatus,
-    Treatment,
-};
+use nightscout::{DocumentBase, Entry, LoopCob, LoopIob, PumpBattery, PumpStatus, Treatment};
+use rust_decimal_macros::dec;
 
 use crate::blobs;
 use crate::log_info;
 use crate::models::{
     Details, Event, InsulinDose, LoopAlgorithm, Meal, Package, RawBlob, Status, Summary,
 };
+use crate::ns_docs::{CorrectionRange, Devicestatus, LoopStatus, OverrideStatus};
 
 pub const APP_NAME: &str = "TwiistSync";
 
@@ -564,9 +563,10 @@ fn cassette_change_to_treatment(summary: &Summary, device: &Option<String>) -> O
 
 // Devicestatus.
 
-/// Build the current IOB/COB and pump status document.
+/// Build the current IOB/COB, pump, and override status document.
 fn package_to_devicestatus(status: &Status, device: &Option<String>) -> Option<Devicestatus> {
-    let loop_ = status.details.as_ref().and_then(details_to_loop_status);
+    let algo = status.loop_algorithm.as_ref();
+    let loop_ = loop_status(status.details.as_ref(), algo);
     let summary_date = status.summary.as_ref().and_then(|s| s.glucose_date);
     let pump_clock = status.date.or(summary_date);
     let pump = status
@@ -582,6 +582,7 @@ fn package_to_devicestatus(status: &Status, device: &Option<String>) -> Option<D
         summary_date,
         status.details.as_ref().and_then(|d| d.active_insulin_date),
         status.details.as_ref().and_then(|d| d.active_carbs_date),
+        algo.and_then(|a| a.last_loop_run_date),
     ]
     .into_iter()
     .flatten()
@@ -592,29 +593,78 @@ fn package_to_devicestatus(status: &Status, device: &Option<String>) -> Option<D
         base: base(identifier, newest, device),
         loop_,
         pump,
+        override_: status
+            .details
+            .as_ref()
+            .map(|d| details_to_override(d, newest)),
     })
 }
 
-fn details_to_loop_status(details: &Details) -> Option<LoopStatus> {
-    let iob_src = details
-        .active_insulin_units
-        .zip(details.active_insulin_date);
-    let cob_src = details.active_carbs_grams.zip(details.active_carbs_date);
-    if iob_src.is_none() && cob_src.is_none() {
+fn loop_status(details: Option<&Details>, algo: Option<&LoopAlgorithm>) -> Option<LoopStatus> {
+    let iob = details.and_then(|d| d.active_insulin_units.zip(d.active_insulin_date));
+    let cob = details.and_then(|d| d.active_carbs_grams.zip(d.active_carbs_date));
+    let last_run = algo.and_then(|a| a.last_loop_run_date);
+    if iob.is_none() && cob.is_none() && last_run.is_none() {
         return None;
     }
     Some(LoopStatus {
         name: Some("Twiist".to_string()),
         version: Some("follower".to_string()),
-        iob: iob_src.map(|(v, ts)| LoopIob {
+        timestamp: last_run.map(|t| t.to_rfc3339()),
+        failure_reason: algo.and_then(loop_error).map(str::to_string),
+        iob: iob.map(|(v, ts)| LoopIob {
             iob: Some(v),
             timestamp: Some(ts.to_rfc3339()),
         }),
-        cob: cob_src.map(|(v, ts)| LoopCob {
+        cob: cob.map(|(v, ts)| LoopCob {
             cob: Some(v),
             timestamp: Some(ts.to_rfc3339()),
         }),
     })
+}
+
+/// The glucose-target override Twiist reports, or an inactive marker so
+/// Nightscout drops the pill once an override ends.
+///
+/// Twiist omits the target fields entirely while no override is active, so a
+/// present range means one is. It gives the override's total duration but
+/// not its start, so the end can't be computed; the override is posted
+/// open-ended and goes inactive when a later package says so.
+fn details_to_override(details: &Details, at: DateTime<Utc>) -> OverrideStatus {
+    let unit = details.target_override_unit.as_deref();
+    let range = details
+        .low_glucose_target_override
+        .zip(details.high_glucose_target_override)
+        .map(|(low, high)| CorrectionRange {
+            min_value: to_mgdl(low, unit),
+            max_value: to_mgdl(high, unit),
+        });
+    let name = if details.pre_meal_target_active == Some(true) {
+        Some("Pre-Meal")
+    } else if details.workout_target_active == Some(true) {
+        Some("Workout")
+    } else if range.is_some() {
+        Some("Override")
+    } else {
+        None
+    };
+    OverrideStatus {
+        active: name.is_some(),
+        name: name.map(str::to_string),
+        timestamp: at.to_rfc3339(),
+        current_correction_range: range,
+        duration: None,
+    }
+}
+
+const MMOL_TO_MGDL: Decimal = dec!(18.01559);
+
+/// Convert a glucose value to whole mg/dL when its unit is mmol/L.
+fn to_mgdl(value: Decimal, unit: Option<&str>) -> Decimal {
+    match unit {
+        Some(u) if u.to_ascii_lowercase().contains("mmol") => (value * MMOL_TO_MGDL).round(),
+        _ => value,
+    }
 }
 
 fn summary_to_pump_status(
@@ -643,13 +693,17 @@ fn summary_to_pump_status(
 
 // Loop error.
 
-fn loop_error_to_treatment(algo: &LoopAlgorithm, device: &Option<String>) -> Option<Treatment> {
-    let err = algo.last_loop_error.as_deref()?;
-    // Skip Twiist's "no error" sentinel values.
-    let trimmed = err.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("noerror") || trimmed == "nil" {
+/// The last loop error, or None for Twiist's "no error" sentinels.
+fn loop_error(algo: &LoopAlgorithm) -> Option<&str> {
+    let err = algo.last_loop_error.as_deref()?.trim();
+    if err.is_empty() || err.eq_ignore_ascii_case("noerror") || err == "nil" {
         return None;
     }
+    Some(err)
+}
+
+fn loop_error_to_treatment(algo: &LoopAlgorithm, device: &Option<String>) -> Option<Treatment> {
+    let err = loop_error(algo)?;
     let date = algo.last_loop_run_date?;
     let identifier = format!("twiist-looperr-{}", date.timestamp());
 
@@ -849,6 +903,141 @@ mod tests {
         assert!(ds.pump.is_some());
         // newest is iob_ts (19:50:00), ahead of both cob_ts and pkg_ts.
         assert_eq!(ds.base.date, iob_ts.timestamp_millis());
+    }
+
+    fn algorithm(last_run: DateTime<Utc>, error: &str) -> LoopAlgorithm {
+        LoopAlgorithm {
+            last_loop_run_date: Some(last_run),
+            last_loop_error: Some(error.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn devicestatus_loop_carries_last_run_and_error() {
+        let iob_ts = Utc.with_ymd_and_hms(2026, 9, 30, 13, 55, 0).unwrap();
+        let run_ts = Utc.with_ymd_and_hms(2026, 9, 30, 13, 56, 59).unwrap();
+        let mut status = status_with(Some((dec!(0.9), iob_ts)), None, None, None, None);
+        status.loop_algorithm = Some(algorithm(run_ts, "missingDataError_glucose"));
+
+        let ds = package_to_devicestatus(&status, &device()).expect("emits a doc");
+        let loop_ = ds.loop_.expect("loop present");
+        assert_eq!(
+            loop_.timestamp.as_deref(),
+            Some("2026-09-30T13:56:59+00:00")
+        );
+        assert_eq!(
+            loop_.failure_reason.as_deref(),
+            Some("missingDataError_glucose")
+        );
+        // The last run is the newest contributing timestamp here.
+        assert_eq!(ds.base.date, run_ts.timestamp_millis());
+    }
+
+    #[test]
+    fn devicestatus_loop_drops_no_error_sentinel() {
+        let run_ts = Utc.with_ymd_and_hms(2026, 9, 30, 23, 55, 42).unwrap();
+        let mut status = status_with(None, None, Some(dec!(0.63)), Some(dec!(26.4)), None);
+        status.loop_algorithm = Some(algorithm(run_ts, "noError"));
+
+        let ds = package_to_devicestatus(&status, &device()).expect("emits a doc");
+        let loop_ = ds.loop_.expect("a last run alone makes a loop status");
+        assert_eq!(
+            loop_.timestamp.as_deref(),
+            Some("2026-09-30T23:55:42+00:00")
+        );
+        assert_eq!(loop_.failure_reason, None);
+        assert!(loop_.iob.is_none());
+    }
+
+    #[test]
+    fn override_pre_meal_is_active_with_mgdl_range() {
+        let at = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 45).unwrap();
+        let details = Details {
+            pre_meal_target_active: Some(true),
+            workout_target_active: Some(false),
+            low_glucose_target_override: Some(dec!(80.0)),
+            high_glucose_target_override: Some(dec!(100.0)),
+            target_override_unit: Some("mg/dL".to_string()),
+            target_override_duration_seconds: Some(3600),
+            ..Default::default()
+        };
+
+        let o = details_to_override(&details, at);
+        assert!(o.active);
+        assert_eq!(o.name.as_deref(), Some("Pre-Meal"));
+        assert_eq!(o.timestamp, "2026-10-01T00:00:45+00:00");
+        assert_eq!(
+            o.current_correction_range,
+            Some(CorrectionRange {
+                min_value: dec!(80.0),
+                max_value: dec!(100.0),
+            })
+        );
+        // Twiist reports the total duration, not the start, so the end is unknown.
+        assert_eq!(o.duration, None);
+    }
+
+    #[test]
+    fn override_workout_converts_mmol_range() {
+        let details = Details {
+            workout_target_active: Some(true),
+            low_glucose_target_override: Some(dec!(4.4)),
+            high_glucose_target_override: Some(dec!(5.6)),
+            target_override_unit: Some("mmol/L".to_string()),
+            ..Default::default()
+        };
+
+        let o = details_to_override(&details, Utc::now());
+        assert_eq!(o.name.as_deref(), Some("Workout"));
+        let range = o.current_correction_range.expect("range present");
+        assert_eq!(range.min_value, dec!(79));
+        assert_eq!(range.max_value, dec!(101));
+    }
+
+    #[test]
+    fn override_with_a_range_but_no_preset_flag_is_generic() {
+        let details = Details {
+            low_glucose_target_override: Some(dec!(80.0)),
+            high_glucose_target_override: Some(dec!(100.0)),
+            ..Default::default()
+        };
+
+        let o = details_to_override(&details, Utc::now());
+        assert!(o.active);
+        assert_eq!(o.name.as_deref(), Some("Override"));
+        assert!(o.current_correction_range.is_some());
+    }
+
+    #[test]
+    fn override_is_inactive_when_twiist_omits_the_targets() {
+        let details = Details {
+            pre_meal_target_active: Some(false),
+            workout_target_active: Some(false),
+            ..Default::default()
+        };
+
+        let o = details_to_override(&details, Utc::now());
+        assert!(!o.active);
+        assert_eq!(o.name, None);
+        assert_eq!(o.current_correction_range, None);
+    }
+
+    #[test]
+    fn devicestatus_serializes_loop_plugin_fields() {
+        let ts = Utc.with_ymd_and_hms(2026, 9, 30, 23, 55, 42).unwrap();
+        let mut status = status_with(Some((dec!(0.9), ts)), None, None, None, Some(ts));
+        status.loop_algorithm = Some(algorithm(ts, "noError"));
+        status.details.as_mut().unwrap().pre_meal_target_active = Some(true);
+
+        let ds = package_to_devicestatus(&status, &device()).expect("emits a doc");
+        let json = serde_json::to_value(&ds).unwrap();
+        assert_eq!(json["loop"]["timestamp"], "2026-09-30T23:55:42+00:00");
+        assert!(json["loop"].get("failureReason").is_none());
+        assert_eq!(json["override"]["active"], true);
+        assert_eq!(json["override"]["name"], "Pre-Meal");
+        assert!(json["override"].get("duration").is_none());
+        assert_eq!(json["identifier"], "devicestatus-1790812542");
     }
 
     fn bolus_from(json: &str) -> Treatment {
