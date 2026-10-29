@@ -123,7 +123,6 @@ pub fn post_batch(
     for (kind, docs) in [
         ("bolus", &batch.bolus),
         ("basal", &batch.basal),
-        ("meal", &batch.meal),
         ("alarm", &batch.alarm),
         ("sitechange", &batch.sitechange),
         ("suspend", &batch.suspend),
@@ -147,6 +146,7 @@ pub fn post_batch(
             }
         }
     }
+    crate::meals::reconcile(pkg, &batch.meal, ns, dry_run, &mut stats);
     post_bucket(
         "devicestatus",
         "devicestatus",
@@ -272,7 +272,7 @@ fn has_other_temp_basal(ns: &NightscoutClient, date_ms: i64) -> Result<bool> {
     )
 }
 
-fn dispatch<T: Serialize>(
+pub(crate) fn dispatch<T: Serialize>(
     collection: &str,
     doc: &T,
     ns: Option<&NightscoutClient>,

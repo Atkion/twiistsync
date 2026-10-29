@@ -901,7 +901,7 @@ dependencies = [
 [[package]]
 name = "nightscout"
 version = "0.1.0"
-source = "git+https://github.com/E-Allie/nightscout-rs.git?rev=26d903b8aed1f43f9cdc1e58cf2e4ac7bae9f82d#26d903b8aed1f43f9cdc1e58cf2e4ac7bae9f82d"
+source = "git+https://github.com/Atkion/nightscout-rs.git?rev=fe1b3f1200803a57b7a9c8555dbaec76213b016d#fe1b3f1200803a57b7a9c8555dbaec76213b016d"
 dependencies = [
  "anyhow",
  "chrono",

@@ -22,6 +22,7 @@ mod daemon;
 mod dispatch;
 mod dump_blobs;
 pub mod log;
+mod meals;
 mod models;
 mod ns_docs;
 mod tidepool_glue;

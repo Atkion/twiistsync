@@ -11,6 +11,7 @@ name = "twiistsync"
 path = "src/main.rs"
 
 [dependencies]
+# Replaced by the Atkion fork; see [patch] below.
 nightscout = { git = "https://github.com/E-Allie/nightscout-rs.git", rev = "26d903b8aed1f43f9cdc1e58cf2e4ac7bae9f82d" }
 tidepool = { git = "https://github.com/E-Allie/tidepool-rs.git", rev = "5d41d88605ae6d6856f38fdbd10e6a85dd9ff630" }
 # Fork of E-Allie/tidepoolsync; see its `local` branch. Never upstreamed.
@@ -29,3 +30,9 @@ base64 = "0.22.1"
 secrecy = { version = "0.10", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
+
+# Fork of E-Allie/nightscout-rs; see its `local` branch. Never upstreamed.
+# Patching the upstream source instead of depending on the fork directly makes
+# tidepoolsync build against the same copy.
+[patch."https://github.com/E-Allie/nightscout-rs.git"]
+nightscout = { git = "https://github.com/Atkion/nightscout-rs.git", rev = "fe1b3f1200803a57b7a9c8555dbaec76213b016d" }

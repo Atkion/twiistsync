@@ -494,7 +494,7 @@ fn derive_scheduled_basal_rate(status: &crate::models::Status) -> Option<Decimal
 
 // Meals.
 
-fn meal_to_treatment(meal: &Meal, device: &Option<String>) -> Option<Treatment> {
+pub(crate) fn meal_to_treatment(meal: &Meal, device: &Option<String>) -> Option<Treatment> {
     let date = meal.start_date.or(meal.added_date)?;
     let grams = meal.grams?;
     let identifier = format!("meal-{}", date.timestamp());
