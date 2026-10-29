@@ -155,7 +155,11 @@ pub struct Details {
 pub struct LoopAlgorithm {
     #[serde(rename = "closedLoopSetting")]
     pub closed_loop_setting: Option<String>,
-    #[serde(rename = "lastLoopRunDate")]
+    #[serde(
+        rename = "lastLoopRunDate",
+        default,
+        deserialize_with = "unset_date_as_none::deserialize"
+    )]
     pub last_loop_run_date: Option<DateTime<Utc>>,
     #[serde(rename = "lastLoopError")]
     pub last_loop_error: Option<String>,
@@ -199,6 +203,21 @@ pub struct Meal {
     pub food_type: Option<String>,
     #[serde(with = "decimal_str", default)]
     pub grams: Option<Decimal>,
+}
+
+/// Twiist reports a loop that hasn't run as 0001-01-01T00:00:00Z (Swift's
+/// `Date.distantPast`). No real date predates 2000, so read those as unset.
+mod unset_date_as_none {
+    use super::*;
+    use chrono::Datelike;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let date = Option::<DateTime<Utc>>::deserialize(deserializer)?;
+        Ok(date.filter(|date| date.year() >= 2000))
+    }
 }
 
 mod finite_i64_or_inf {
@@ -268,6 +287,26 @@ mod finite_i64_or_inf {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn a_loop_that_has_not_run_has_no_last_run_date() {
+        let never: LoopAlgorithm = serde_json::from_str(
+            r#"{"lastLoopError":"missingDataError_glucose","lastLoopRunDate":"0001-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(never.last_loop_run_date, None);
+        assert_eq!(
+            never.last_loop_error.as_deref(),
+            Some("missingDataError_glucose")
+        );
+
+        let ran: LoopAlgorithm =
+            serde_json::from_str(r#"{"lastLoopRunDate":"2026-10-28T23:59:30Z"}"#).unwrap();
+        assert!(ran.last_loop_run_date.is_some());
+
+        let absent: LoopAlgorithm = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.last_loop_run_date, None);
+    }
 
     /// Numeric fields are strings in real responses.
     #[test]

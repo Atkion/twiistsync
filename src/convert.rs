@@ -935,6 +935,27 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_error_without_a_run_reports_the_reason_but_posts_no_note() {
+        let iob_ts = Utc.with_ymd_and_hms(2026, 10, 29, 0, 45, 0).unwrap();
+        let mut status = status_with(Some((dec!(0.9), iob_ts)), None, None, None, None);
+        let algo = LoopAlgorithm {
+            last_loop_run_date: None,
+            last_loop_error: Some("missingDataError_glucose".to_string()),
+            ..Default::default()
+        };
+        assert!(loop_error_to_treatment(&algo, &device()).is_none());
+        status.loop_algorithm = Some(algo);
+
+        let ds = package_to_devicestatus(&status, &device()).expect("emits a doc");
+        let loop_ = ds.loop_.expect("loop present");
+        assert_eq!(loop_.timestamp, None);
+        assert_eq!(
+            loop_.failure_reason.as_deref(),
+            Some("missingDataError_glucose")
+        );
+    }
+
+    #[test]
     fn devicestatus_loop_drops_no_error_sentinel() {
         let run_ts = Utc.with_ymd_and_hms(2026, 9, 30, 23, 55, 42).unwrap();
         let mut status = status_with(None, None, Some(dec!(0.63)), Some(dec!(26.4)), None);
